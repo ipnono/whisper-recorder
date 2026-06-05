@@ -16,42 +16,58 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                              Windows Side                                 │
+│                              Windows Host                                 │
+│                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Hotkey Binary (C + Win32 API)                                  │    │
+│  │  Hotkey Binary (C + Win32 API)  — windows/hotkey.exe            │    │
 │  │  - Global hotkey: Ctrl+Space                                     │    │
 │  │  - Floating window UI (always-on-top)                            │    │
 │  │  - Activity log (5 lines, rolling)                               │    │
 │  │  - System tray minimize                                          │    │
+│  │  - TCP client to recorder (one connection per command)          │    │
 │  └───────────────────────┬─────────────────────────────────────────┘    │
-│                          │ TCP (localhost)                               │
+│                          │ TCP localhost:8765                            │
+│                          │ (one connection per command)                  │
 └──────────────────────────┼──────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                               WSL Side                                   │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Main Application (C)                                           │    │
-│  │                                                                   │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │    │
-│  │  │ Audio Proxy │─▶│ VAD Detect  │─▶│ Transcription│              │    │
-│  │  │  (stdin)    │  │  (silence)  │  │ (whisper.cpp)│              │    │
-│  │  └─────────────┘  └─────────────┘  └──────┬──────┘              │    │
-│  │                                             │                      │    │
-│  │                                             ▼                      │    │
-│  │                                    ┌─────────────┐                │    │
-│  │                                    │ MD Writer   │                │    │
-│  │                                    │ (session)   │                │    │
-│  │                                    └─────────────┘                │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
+│                          Recorder  — mingw/build/whisper-recorder.exe   │
+│                                                                          │
+│  Built with: MSYS2 + MinGW-w64 + GCC. Runs natively on Windows.        │
+│                                                                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                    │
+│  │ Audio (winmm)│─▶│ VAD Detect  │─▶│ Transcription│                   │
+│  │  mic capture │  │  (silence)  │  │ (whisper.cpp)│                   │
+│  └─────────────┘  └─────────────┘  └──────┬──────┘                    │
+│                                             │                           │
+│                                             ▼                           │
+│                                    ┌─────────────┐                     │
+│                                    │ MD Writer   │                     │
+│                                    │ (session)   │                     │
+│                                    └─────────────┘                     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+Both binaries are **native Windows .exe files**. There is no WSL, no
+Linux runtime, no virtual machine. The TCP socket is plain localhost
+on port 8765.
+
+The "recorder" name reflects the actual build target:
+`mingw/build/whisper-recorder.exe`. The folder used to be called
+`wsl/` (when it was used as a cross-compile environment); it was
+renamed to `mingw/` because (a) WSL is no longer required, and
+(b) "WSL" was a misnomer — the produced binary was always a
+Windows .exe. See `docs/adr/0001-msys2-mingw-build.md` for the
+rationale.
 
 ---
 
 ## 3. Components
 
-### 3.1 Windows Hotkey Binary
+### 3.1 Windows Hotkey Binary (UI client)
+
+**Path:** `windows/hotkey.c` → `windows/hotkey.exe` (0.3 MB)
 
 **Language:** C with Win32 API
 
@@ -62,9 +78,9 @@
 - Rolling activity log (5 lines)
 - System tray icon with context menu
 - X button minimizes to tray
-- TCP client to send commands to WSL app
+- TCP client to recorder (one connection per command — see protocol note below)
 
-**IPC Commands (Windows → WSL):**
+**IPC Commands (UI → Recorder):**
 ```
 START <session_name>     - Start new session
 STOP                     - Stop current session
@@ -73,40 +89,57 @@ RESUME                   - Resume recording
 STATUS                   - Query status
 ```
 
-### 3.2 WSL Main Application
+**Protocol note (important):** the recorder accepts exactly **one
+command per TCP connection**, then closes the socket. The UI
+client opens a fresh connection for each command. This is by
+design (see `mingw/src/main.c` near `closesocket(client_fd)`).
 
-**Language:** C
+### 3.2 Recorder Main Application (server)
+
+**Path:** `mingw/src/*.c` → `mingw/build/whisper-recorder.exe` (2.7 MB)
+
+**Language:** C, statically linked against whisper.cpp
 
 **Modules:**
 
-#### 3.2.1 Audio Proxy
-- Receives audio via stdin from Windows proxy
-- Converts to 16kHz mono 16-bit PCM
-- Feeds audio buffer to VAD module
+#### 3.2.1 Audio Capture
+- Uses **Windows Multimedia API (`winmm.dll`)** for direct microphone
+  capture — `waveInOpen` / `waveInStart` / `waveInStop` /
+  `waveInClose`.
+- Sample format: 16 kHz, mono, 16-bit PCM (matches whisper.cpp's
+  required `WHISPER_SAMPLE_RATE`).
+- Capture is **polled in a dedicated thread** (CALLBACK_NULL
+  mode) and pushed into a ring buffer.
+- (Note: an earlier version of this PRD said "audio via stdin
+  from a Windows proxy". That was a planned design that was
+  never built. The current implementation captures directly
+  from the audio device on the same Windows host.)
 
 #### 3.2.2 VAD Detection
-- Uses whisper.cpp built-in VAD
-- Parameters:
+- Uses whisper.cpp's built-in Silero VAD (`ggml-silero-v6.2.0.bin`).
+- Parameters (in `config.json` / `mingw/Makefile`):
   - `vad_threshold`: 0.5
   - `min_speech_duration_ms`: 250ms
   - `min_silence_duration_ms`: 100ms (segment split)
   - `speech_pad_ms`: 30ms
 
 #### 3.2.3 Transcription
-- Uses whisper.cpp C API
-- Model: Auto-download `base.bin` (multilingual) on first run
-- Supports Chinese and English
-- Language configurable at runtime
+- Uses whisper.cpp C API.
+- Model: `ggml-base.bin` (multilingual, ~142 MiB), downloaded
+  on first run.
+- Supports Chinese and English out of the box; other languages
+  via `--language` flag.
+- Language configurable at runtime.
 
 #### 3.2.4 Markdown Writer
-- Output directory: `configurable/recordings/`
-- File structure: `YYYY-MM-DD/session-HH-MM-SS.md`
+- Output directory: configurable (default `D:/recordings`).
+- File structure: `YYYY-MM-DD/session-HH-MM-SS.md`.
 - Format:
 ```markdown
 # Session: session-2024-01-15-10-30
 
-**Started:** 2024-01-15 10:30:00  
-**Language:** zh  
+**Started:** 2024-01-15 10:30:00
+**Language:** zh
 **Duration:** 00:15:32
 
 ---
@@ -120,11 +153,15 @@ Another sentence here.
 **Transcribed segments:** 12
 ```
 
-### 3.3 TCP Server (WSL Side)
+### 3.3 TCP Server (Recorder side)
+
+**Path:** `mingw/src/main.c` (function `create_server`,
+`handle_command`)
 
 **Port:** 8765 (configurable)
 
-**Protocol:** Plain text commands, newline-terminated
+**Protocol:** Plain text commands, newline-terminated.
+**One command per connection** (see protocol note in 3.1).
 
 **Commands:**
 - `START:<session_name>` - Start new session
@@ -132,7 +169,8 @@ Another sentence here.
 - `PAUSE` - Pause recording
 - `RESUME` - Resume recording
 - `STATUS` - Returns status JSON
-- `SET_LANG:<lang>` - Set language (en/zh)
+- `SET_LANG:<lang>` - Set language (en/zh) *(implemented in
+  protocol spec; current handler has a stub for it)*
 
 ---
 
@@ -242,7 +280,6 @@ IDLE → RECORDING → PAUSED → RECORDING → STOPPED
 ### 6.2 System Tray
 
 **Icon:** Microphone icon
-
 **Context Menu:**
 - Show Window
 - Start Recording
@@ -287,29 +324,66 @@ IDLE → RECORDING → PAUSED → RECORDING → STOPPED
 
 ## 9. Build & Dependencies
 
-### 9.1 Windows Binary
-- Compiler: MSVC or MinGW-w64
-- Dependencies: Win32 API (built-in)
-- Output: Single .exe file
+### 9.1 Toolchain
+- **MSYS2** (https://www.msys2.org/) — install once.
+- In the **MSYS2 MinGW 64-bit** terminal:
+  ```bash
+  pacman -Syu
+  pacman -S --needed --noconfirm \
+      mingw-w64-x86_64-gcc \
+      mingw-w64-x86_64-cmake \
+      mingw-w64-x86_64-make \
+      mingw-w64-x86_64-pkg-config \
+      mingw-w64-x86_64-curl \
+      git \
+      base-devel
+  ```
+- Optionally add `C:\msys64\mingw64\bin` to the Windows `PATH` so
+  `gcc`/`cmake` are usable from PowerShell / cmd too.
 
-### 9.2 WSL Application
-- Compiler: GCC
-- Dependencies:
-  - whisper.cpp (included as submodule or vendored)
-  - POSIX sockets (built-in)
-- Output: Single binary
+### 9.2 Recorder (mingw/)
+- Compiler: `gcc` from MinGW-w64
+- Output: `mingw/build/whisper-recorder.exe` (statically links
+  whisper.cpp + ggml)
+- Vendored: `mingw/third_party/whisper.cpp/` (gitignored;
+  populated by `build.sh` via `git clone --depth 1`)
 
-### 9.3 Build Commands
+### 9.3 Hotkey UI (windows/)
+- Compiler: `gcc` from MinGW-w64
+- Output: `windows/hotkey.exe`
+- Single source file, no vendored dependencies.
+
+### 9.4 Build Commands
 ```bash
-# WSL
-cd wsl
-mkdir -p build && cd build
-cmake .. && make
+# From MSYS2 MinGW 64-bit terminal, at the project root
 
-# Windows (MinGW-w64)
-cd windows
-gcc -o hotkey.exe hotkey.c -luser32 -lgdi32 -lws2_32 -lwinmm
+# Recorder (server)
+./build.sh
+# which does:
+#   1. clone whisper.cpp into mingw/third_party/
+#   2. download ggml-base.bin (~141 MiB) if missing
+#   3. cmake + make libwhisper.a + make whisper-recorder.exe
+
+# Hotkey UI (client)
+cd windows && mingw32-make && cd ..
 ```
+
+### 9.5 Model download
+The model URL is set in `mingw/Makefile`:
+`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin`
+The base URL is overridable via the `HF_ENDPOINT` env var
+(standard Hugging Face convention):
+```bash
+# China (Sangfor VPN / corporate networks):
+export HF_ENDPOINT=https://hf-mirror.com
+make download-model
+
+# Add to ~/.bashrc to persist across shells.
+```
+
+The file path uses the `ggerganov` org (not `ggml-org`) because
+that's what the China-side mirrors currently have synced. The
+file is the same.
 
 ---
 
@@ -318,29 +392,37 @@ gcc -o hotkey.exe hotkey.c -luser32 -lgdi32 -lws2_32 -lwinmm
 ```
 whisper-recorder/
 ├── doc/
-│   └── PRD.md
-├── windows/
-│   ├── hotkey.c           # Windows hotkey + UI
+│   ├── PRD.md                  # this file
+│   ├── issues/                 # one file per implementation issue
+│   └── adr/                    # architecture decision records
+├── mingw/                      # Recorder (server), MinGW build
+│   ├── build/
+│   │   └── whisper-recorder.exe    # build output
+│   ├── src/                    # 7 .c files
+│   │   ├── main.c              # entry, TCP server, audio capture, VAD, transcribe
+│   │   ├── audio.c
+│   │   ├── download.c
+│   │   ├── session.c
+│   │   ├── transcribe.c
+│   │   └── writer.c
+│   ├── third_party/whisper.cpp/    # vendored, gitignored
 │   ├── Makefile
 │   └── README.md
-├── wsl/
-│   ├── src/
-│   │   ├── main.c         # Entry point, TCP server
-│   │   ├── audio.c        # Audio buffer management
-│   │   ├── vad.c          # VAD integration
-│   │   ├── transcribe.c   # Whisper transcription
-│   │   ├── writer.c       # Markdown output
-│   │   └── config.c       # Config loading
-│   ├── include/
-│   │   └── whisper.h      # From whisper.cpp
-│   ├── third_party/
-│   │   └── whisper.cpp    # Vendored whisper
+├── windows/                    # Hotkey UI (client), MinGW build
+│   ├── build/  (or just hotkey.exe)
+│   ├── hotkey.c
 │   ├── Makefile
 │   └── README.md
-├── config.json            # Default config
+├── build.sh                    # top-level build (idempotent)
+├── config.json                 # default config
 ├── .gitignore
 └── README.md
 ```
+
+`mingw/src/config.c` exists on disk but is NOT in the build. It
+is a self-contained Linux-style "main program" kept for reference
+(history preservation); it would collide at link time with
+`main.c`'s `main()`. See commit history for the removal rationale.
 
 ---
 
@@ -359,11 +441,13 @@ whisper-recorder/
 
 ### 11.2 UI Requirements
 - [x] TCP server accepts commands from any client
-- [ ] Floating window shows current status (not implemented)
-- [ ] Activity log updates in real-time (not implemented)
-- [ ] Window is always-on-top (not implemented)
-- [ ] X button minimizes to tray (not implemented)
-- [ ] System tray icon has working context menu (not implemented)
+- [x] UI binary builds (windows/hotkey.exe, 0.3 MB)
+- [x] UI binary launches, creates the Win32 window, enters message loop
+- [x] UI binary does not crash the recorder when both are running
+- [⚠️] Visual verification of the floating window and tray icon
+  — not done in CI/automation. The hotkey.exe binary builds and
+  stays running for 3+ seconds in headless smoke test; full visual
+  fidelity has to be checked by a human on a desktop session.
 
 ### 11.3 Error Handling
 - [x] Audio device detection (--list-devices)
@@ -377,52 +461,66 @@ whisper-recorder/
 ## 12. Implementation Status (2026-06-05)
 
 ### Completed
-- [x] WSL Server binary (`whisper-recorder.exe`)
-- [x] TCP server on port 8765
-- [x] Audio capture via winmm.dll
-- [x] Whisper model loading (148MB ggml-base.bin)
+- [x] **Build environment** — MSYS2 + MinGW-w64 (no WSL required)
+- [x] **Recorder binary** (`mingw/build/whisper-recorder.exe`, 2.7 MB)
+- [x] **Hotkey UI binary** (`windows/hotkey.exe`, 0.3 MB)
+- [x] TCP server on port 8765 (one command per connection)
+- [x] Audio capture via `winmm.dll`
+- [x] Whisper model loading (141 MiB `ggml-base.bin`, base model)
 - [x] Transcription pipeline
-- [x] Session management
-- [x] Markdown writer
+- [x] Session management (state machine, auto-split, session naming)
+- [x] Markdown writer (date-based dirs, per-session files)
 - [x] Command handlers (START/STOP/PAUSE/RESUME/STATUS)
+- [x] **End-to-end smoke test passes** — all 7 TCP commands
+      return correct responses; state transitions correctly
+- [x] `HF_ENDPOINT` env var support for users behind firewalls
+- [x] Documentation (this file + READMEs + ADRs)
 
-### In Progress
-- [ ] Windows UI (floating window, hotkey)
-- [ ] Full VAD integration (using energy fallback)
-
-### Remaining
-- [ ] Windows UI (floating window, hotkey)
-- [ ] Global hotkey integration
-- [ ] Real-time transcription output
-- [ ] Error recovery
+### Remaining (out of scope for current push)
+- [ ] Full visual verification of the floating window on a real
+      desktop session (the headless smoke test only checks
+      "binary stays running for 3s without crashing")
+- [ ] Silence/timeout warnings (-Wformat-truncation,
+      -Wstringop-truncation) — non-fatal, code is correct
+- [ ] Remove the dead `mingw/src/config.c` from disk
+- [ ] Re-record the smoke test with an actual recording (right
+      now we test the state machine but not the audio →
+      markdown pipeline end-to-end with a real voice input)
 
 ### Build Commands
 ```bash
-# Build everything
-cd wsl
-make cmake
-make build-whisper
-make download-model
-make
-
-# Run
-./build/whisper-recorder.exe -m third_party/whisper.cpp/models/ggml-base.bin
+# From MSYS2 MinGW 64-bit terminal, at the project root
+export HF_ENDPOINT=https://hf-mirror.com   # optional, for China
+./build.sh                                # builds recorder
+(cd windows && mingw32-make)              # builds UI
 ```
 
-### Test Results (2026-06-05)
+### Test Results (2026-06-05, end-to-end smoke test)
+
 ```
-STATUS → {"state":"IDLE","session":"","language":"zh"} ✅
-START:final → OK: Session started ✅
-STATUS → {"state":"RECORDING","session":"final","language":"zh"} ✅
-STOP → OK: Session stopped ✅
-STATUS → {"state":"IDLE","session":"","language":"zh"} ✅
+> STATUS                 -> {"state":"IDLE","session":"","language":"zh"}
+> START:smoketest        -> OK: Session started: smoketest
+> STATUS                 -> {"state":"RECORDING","session":"smoketest","language":"zh"}
+> PAUSE                  -> OK: Paused
+> RESUME                 -> OK: Resumed
+> STOP                   -> OK: Session stopped
+> STATUS                 -> {"state":"IDLE","session":"","language":"zh"}
+ALL CHECKS PASSED
 ```
 
-**Output:** Session files created at `D:/recordings/YYYY-MM-DD/session-HH-MM-SS.md`
+The test opens one TCP connection per command (per protocol),
+asserts that the state transitions IDLE → RECORDING → PAUSED →
+RECORDING → IDLE, and verifies the server is still responsive
+after the UI binary is launched.
+
+**Output:** Session files created at
+`D:/recordings/YYYY-MM-DD/session-HH-MM-SS.md` (verified by
+configuration; actual file write only happens when audio
+recording completes — not exercised in the headless smoke test).
 
 ---
 
-## 12. Future Considerations (Out of Scope)
+## 13. Future Considerations (Out of Scope)
 
 - Multiple language mixed transcription
 - Speaker diarization
@@ -433,6 +531,18 @@ STATUS → {"state":"IDLE","session":"","language":"zh"} ✅
 
 ---
 
-**Document Version:** 1.0  
-**Created:** 2024-01-15  
-**Status:** Approved for implementation
+## 14. Related Documents
+
+- `README.md` — quick start and architecture overview
+- `mingw/README.md` — recorder-specific docs
+- `windows/README.md` — UI-specific docs
+- `doc/adr/0001-msys2-mingw-build.md` — rationale for the
+  MSYS2/MinGW build (not WSL, not Docker, not MSVC)
+- `doc/issues/` — per-feature implementation notes
+
+---
+
+**Document Version:** 1.1
+**Created:** 2024-01-15
+**Last updated:** 2026-06-05
+**Status:** Active
