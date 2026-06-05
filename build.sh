@@ -1,65 +1,43 @@
 #!/bin/bash
-# Build script for Whisper Recorder
+# Whisper Recorder - one-shot build script
+# Run from MSYS2 "MinGW 64-bit" terminal, at the project root.
 
 set -e
 
-echo "=== Whisper Recorder Build Script ==="
+echo "=== Whisper Recorder Build ==="
 echo ""
 
-# Check environment
-if [ ! -d "wsl" ]; then
-    echo "Error: Run this script from the project root"
+if [ ! -d "mingw" ]; then
+    echo "ERROR: run this script from the project root (where mingw/ lives)."
     exit 1
 fi
 
-cd wsl
-
-# Step 1: Build whisper.cpp
-echo "Step 1: Building whisper.cpp..."
-if [ ! -d "third_party/whisper.cpp/build" ]; then
-    echo "  Running cmake..."
-    cd third_party/whisper.cpp
-    mkdir -p build
-    cd build
-    cmake .. -DCMAKE_BUILD_TYPE=Release \
-              -DWHISPER_SDL2=OFF \
-              -DWHISPER_CUBLAS=OFF \
-              -DWHISPER_METAL=OFF \
-              -G "MinGW Makefiles"
-    cd ../..
-fi
-
-echo "  Building whisper libraries..."
-cd third_party/whisper.cpp/build
-mingw32-make -j4
-cd ../../..
-
-echo "  whisper.cpp built successfully"
-
-# Step 2: Download model
-echo ""
-echo "Step 2: Checking model..."
-if [ ! -f "third_party/whisper.cpp/models/ggml-base.bin" ]; then
-    echo "  Downloading ggml-base.bin..."
-    mkdir -p third_party/whisper.cpp/models
-    curl -L -o third_party/whisper.cpp/models/ggml-base.bin \
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+# 1. Vendor whisper.cpp source
+if [ ! -d "mingw/third_party/whisper.cpp/CMakeLists.txt" ]; then
+    echo "[1/3] Cloning whisper.cpp (shallow)..."
+    mkdir -p "mingw/third_party"
+    git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git \
+        "mingw/third_party/whisper.cpp"
 else
-    echo "  Model already exists"
+    echo "[1/3] whisper.cpp source already present"
 fi
 
-# Step 3: Build application
+# 2. Download ggml-base.bin if missing
 echo ""
-echo "Step 3: Building whisper-recorder..."
-g++ build/main.o -o build/whisper-recorder.exe \
-    ./libcombined.a \
-    -lm -lpthread -lws2_32 -lgomp -lwinmm
+echo "[2/3] Ensuring whisper model is present..."
+( cd "mingw" && make download-model )
+
+# 3. Build
+echo ""
+echo "[3/3] Building whisper-recorder.exe..."
+( cd "mingw" && make )
 
 echo ""
-echo "=== Build Complete ==="
+echo "=== Build complete ==="
+echo "Binary: mingw/build/whisper-recorder.exe"
 echo ""
-echo "Binary: wsl/build/whisper-recorder.exe"
+echo "Quick check:"
+echo "  mingw/build/whisper-recorder.exe --version"
 echo ""
-echo "To run:"
-echo "  cd wsl"
-echo "  ./build/whisper-recorder.exe -m third_party/whisper.cpp/models/ggml-base.bin"
+echo "Run server (after plugging in the Windows UI binary in windows/):"
+echo "  mingw/build/whisper-recorder.exe -m mingw/third_party/whisper.cpp/models/ggml-base.bin"

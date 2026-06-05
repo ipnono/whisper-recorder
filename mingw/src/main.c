@@ -163,7 +163,7 @@ static void log_event(const char *event, const char *data) {
     }
 }
 
-static void events_emit(const char *event, const char *data) {
+void events_emit(const char *event, const char *data) {
     log_event(event, data);
 }
 
@@ -1084,6 +1084,8 @@ int main(int argc, char *argv[]) {
                 printf("Command: %s\n", buffer);
                 handle_command(buffer, client_fd);
             }
+            // Protocol: one command per connection, server closes after handling.
+            // Clients must open a new TCP connection for each command.
             closesocket(client_fd);
         }
     }

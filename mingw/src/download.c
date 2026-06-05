@@ -67,7 +67,7 @@ static bool ensure_directory(const char *path) {
         
         struct stat st = {0};
         if (stat(dir, &st) == -1) {
-            if (mkdir(dir, 0755) == -1) {
+            if (mkdir(dir) == -1) {
                 return false;
             }
         }

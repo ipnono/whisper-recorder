@@ -16,5 +16,10 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
-wsl/third_party/whisper.cpp
-wsl/third_party/
+
+# opencode CLI local state (not part of the project)
+.opencode/
+
+# Vendored third-party (whisper.cpp source tree)
+mingw/third_party/whisper.cpp/
+mingw/third_party/

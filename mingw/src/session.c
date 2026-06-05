@@ -60,6 +60,9 @@ static time_t g_last_split_time = 0;
 extern void events_emit(const char *event, const char *data);
 #endif
 
+// Forward decl: session_start() calls session_end()
+void session_end(void);
+
 // ============================================================================
 // Utility
 // ============================================================================

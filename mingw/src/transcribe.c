@@ -52,6 +52,9 @@ static bool g_model_loaded = false;
 extern void events_emit(const char *event, const char *data);
 #endif
 
+// Forward decl: transcription_init() calls transcription_shutdown() on re-init
+void transcription_shutdown(void);
+
 // ============================================================================
 // Model Loading
 // ============================================================================

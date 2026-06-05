@@ -54,6 +54,9 @@ static bool g_in_session = false;
 extern void events_emit(const char *event, const char *data);
 #endif
 
+// Forward decl: writer_shutdown() calls writer_end_session()
+void writer_end_session(void);
+
 // ============================================================================
 // Utility
 // ============================================================================
@@ -136,10 +139,10 @@ bool writer_start_session(const char *session_name) {
         char date_dir[32];
         get_date_dir(date_dir, sizeof(date_dir));
         
-        snprintf(dir_path, sizeof(dir_path), "%s/%s", 
-                 g_config.base_dir, date_dir);
+        snprintf(dir_path, sizeof(dir_path), "%s/%s",
+                 g_writer_config.base_dir, date_dir);
     } else {
-        snprintf(dir_path, sizeof(dir_path), "%s", g_config.base_dir);
+        snprintf(dir_path, sizeof(dir_path), "%s", g_writer_config.base_dir);
     }
     
     if (!ensure_directory(dir_path)) {
