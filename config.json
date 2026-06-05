@@ -1,0 +1,33 @@
+{
+  "model": {
+    "path": "~/.whisper/models/ggml-base.bin",
+    "auto_download": true,
+    "download_url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+  },
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "bit_depth": 16
+  },
+  "vad": {
+    "threshold": 0.5,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 100,
+    "speech_pad_ms": 30,
+    "session_silence_timeout_ms": 60000,
+    "max_session_duration_ms": 600000
+  },
+  "output": {
+    "base_dir": "D:/recordings",
+    "create_date_dirs": true
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "language": "zh",
+  "log": {
+    "level": "INFO",
+    "file": "whisper-recorder.log"
+  }
+}

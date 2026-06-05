@@ -1,0 +1,20 @@
+# Build artifacts
+build/
+*.o
+*.exe
+
+# Model files
+*.bin
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+wsl/third_party/whisper.cpp
+wsl/third_party/
